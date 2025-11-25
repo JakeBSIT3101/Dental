@@ -105,6 +105,42 @@ def fetch_treatments() -> Tuple[bool, str, Optional[list[dict]]]:
             pass
 
 
+def insert_patient(
+    first_name: str,
+    last_name: str,
+    birth_date: str,
+    age_group: str,
+    gender: str,
+    phone: str,
+    email: str,
+    address: str | None = None,
+) -> Tuple[bool, str]:
+    """Insert a patient row into patients table with current timestamp."""
+    try:
+        conn = get_connection()
+    except Error as exc:
+        return False, f"DB connection failed: {exc}"
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO patients (first_name, last_name, birth_date, age_group, gender, phone, email, address, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """,
+            (first_name, last_name, birth_date, age_group, gender, phone, email, address),
+        )
+        conn.commit()
+        return True, "Patient added."
+    except Error as exc:
+        return False, f"Insert failed: {exc}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def fetch_appointments() -> Tuple[bool, str, Optional[list[dict]]]:
     """Return all rows from appointments table."""
     try:

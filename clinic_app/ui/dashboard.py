@@ -2,7 +2,13 @@ import customtkinter as ctk
 import tkinter as tk
 
 from clinic_app.logic.treatment import get_basic_treatment
-from clinic_app.db_mysql import fetch_patients, fetch_appointments, fetch_dentists, fetch_treatments
+from clinic_app.db_mysql import (
+    fetch_patients,
+    fetch_appointments,
+    fetch_dentists,
+    fetch_treatments,
+    insert_patient,
+)
 
 
 class DashboardFrame(ctk.CTkFrame):
@@ -39,6 +45,8 @@ class DashboardFrame(ctk.CTkFrame):
         self.selected_treatments: list[dict] = []
         self.payment_amount: float = 0.0
         self.patient_input_data: dict[str, str] = {}
+        self.treatment_patient_name: str | None = None
+        self.treatment_dentist_name: str | None = None
 
         toggle_btn = ctk.CTkButton(
             top_bar,
@@ -51,7 +59,7 @@ class DashboardFrame(ctk.CTkFrame):
         toggle_btn.grid(row=0, column=0, padx=(0, 8), pady=4, sticky="w")
 
         # Drawer content
-        for i, label in enumerate(["Patient history", "Treatments", "Appointments", "Patients", "Payments"]):
+        for i, label in enumerate(["Patient history", "Treatments", "Appointments", "Patients", "Payment history"]):
             ctk.CTkButton(
                 self.drawer,
                 text=label,
@@ -112,6 +120,14 @@ class DashboardFrame(ctk.CTkFrame):
         # Reset payment when items change
         self.payment_amount = 0.0
         self._update_receipt()
+
+    def _handle_treatment_click(self, name: str) -> None:
+        """Ensure patient is selected before adding treatment."""
+        if not self.treatment_patient_name:
+            self._prompt_treatment_patient()
+            if not self.treatment_patient_name:
+                return
+        self._add_treatment_to_receipt(name)
 
     def _show_payment_modal(self) -> None:
         """Prompt for payment amount and update receipt."""
@@ -207,6 +223,81 @@ class DashboardFrame(ctk.CTkFrame):
         summary = ", ".join(f"{k}: {v}" for k, v in self.patient_input_data.items())
         self.status.configure(text=f"Collected: {summary}")
 
+    def _prompt_treatment_patient(self) -> None:
+        """Prompt for patient selection before adding treatments."""
+        ok, msg, rows = fetch_patients()
+        if not ok or not rows:
+            self.status.configure(text=msg or "No patients available.")
+            return
+        names = []
+        for r in rows:
+            full_name = f"{r.get('first_name','').strip()} {r.get('last_name','').strip()}".strip()
+            if full_name:
+                names.append(full_name)
+        ok_den, msg_den, dentists = fetch_dentists()
+        dentist_names = []
+        if ok_den and dentists:
+            for r in dentists:
+                name = (
+                    r.get("full_name")
+                    or r.get("fullname")
+                    or f"{r.get('first_name','').strip()} {r.get('last_name','').strip()}".strip()
+                ).strip()
+                if name:
+                    dentist_names.append(name)
+        if not names:
+            self.status.configure(text="No patients available.")
+            return
+        if not dentist_names:
+            self.status.configure(text=msg_den or "No dentists available.")
+            return
+
+        modal = ctk.CTkToplevel(self)
+        modal.title("Select patient and dentist")
+        modal.geometry("360x240")
+        modal.grab_set()
+        modal.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(modal, text="Choose patient for treatments:").grid(
+            row=0, column=0, padx=12, pady=(12, 4), sticky="w"
+        )
+        combo_patient = ctk.CTkComboBox(modal, values=names, state="readonly")
+        combo_patient.set(names[0])
+        combo_patient.grid(row=1, column=0, padx=12, pady=4, sticky="ew")
+
+        ctk.CTkLabel(modal, text="Choose dentist:").grid(
+            row=2, column=0, padx=12, pady=(12, 4), sticky="w"
+        )
+        combo_dentist = ctk.CTkComboBox(modal, values=dentist_names, state="readonly")
+        combo_dentist.set(dentist_names[0])
+        combo_dentist.grid(row=3, column=0, padx=12, pady=4, sticky="ew")
+
+        status_lbl = ctk.CTkLabel(modal, text="", text_color="orange")
+        status_lbl.grid(row=4, column=0, padx=12, pady=(4, 0), sticky="w")
+
+        def confirm_patient() -> None:
+            pval = combo_patient.get().strip()
+            dval = combo_dentist.get().strip()
+            if not pval:
+                status_lbl.configure(text="Select a patient.")
+                return
+            if not dval:
+                status_lbl.configure(text="Select a dentist.")
+                return
+            self.treatment_patient_name = pval
+            self.treatment_dentist_name = dval
+            self.status.configure(text=f"Patient: {pval} | Dentist: {dval}")
+            modal.destroy()
+
+        ctk.CTkButton(
+            modal,
+            text="Confirm",
+            fg_color="#123055",
+            hover_color="#0c2340",
+            text_color="#ffffff",
+            command=confirm_patient,
+        ).grid(row=5, column=0, padx=12, pady=12, sticky="ew")
+
     def _show_add_patient_modal(self) -> None:
         """Modal to capture new patient info."""
         top = ctk.CTkToplevel(self)
@@ -224,6 +315,7 @@ class DashboardFrame(ctk.CTkFrame):
             ("gender", "Gender"),
             ("phone", "Phone"),
             ("email", "Email"),
+            ("address", "Address"),
         ]
         entries = {}
 
@@ -253,14 +345,57 @@ class DashboardFrame(ctk.CTkFrame):
                     data[key] = widget.get().strip()
                 else:
                     data[key] = widget.get().strip()
-            # Placeholder: just show summary in status
-            summary = ", ".join(f"{k}: {v}" for k, v in data.items())
-            self.status.configure(text=f"Add patient (placeholder): {summary}")
-            top.destroy()
 
-        ctk.CTkButton(top, text="Confirm", command=confirm).grid(
-            row=len(fields) + 1, column=0, columnspan=2, padx=8, pady=12, sticky="ew"
-        )
+            ok, msg = insert_patient(
+                data.get("first_name", ""),
+                data.get("last_name", ""),
+                data.get("birth_date", ""),
+                data.get("age_group", ""),
+                data.get("gender", ""),
+                data.get("phone", ""),
+                data.get("email", ""),
+                data.get("address", ""),
+            )
+            if not ok:
+                status_lbl.configure(text=msg)
+                return
+            try:
+                if hasattr(self, "status") and self.status.winfo_exists():
+                    self.status.configure(text=msg)
+                if hasattr(self, "status_patients") and self.status_patients.winfo_exists():
+                    self.status_patients.configure(text=msg)
+            except Exception:
+                pass
+            # Show success modal
+            ok_modal = ctk.CTkToplevel(self)
+            ok_modal.title("Success")
+            ok_modal.geometry("260x120")
+            ok_modal.grab_set()
+            ok_modal.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(ok_modal, text="Add Patient Successful").grid(
+                row=0, column=0, padx=12, pady=(16, 8), sticky="n"
+            )
+            ctk.CTkButton(
+                ok_modal,
+                text="OK",
+                fg_color="#123055",
+                hover_color="#0c2340",
+                text_color="#ffffff",
+                command=ok_modal.destroy,
+            ).grid(row=1, column=0, padx=12, pady=(4, 12), sticky="ew")
+
+            top.destroy()
+            # Refresh patients view
+            self._render_patients()
+
+        ctk.CTkButton(
+            top,
+            text="Confirm",
+            fg_color="#123055",
+            hover_color="#0c2340",
+            text_color="#ffffff",
+            command=confirm,
+        ).grid(row=len(fields), column=0, columnspan=2, padx=8, pady=(4, 4), sticky="ew")
 
     def _toggle_drawer(self) -> None:
         """Show/hide the left drawer of modules."""
@@ -441,6 +576,8 @@ class DashboardFrame(ctk.CTkFrame):
                 if not name:
                     continue
                 self.treatment_catalog[name] = r
+        # Require patient selection
+        self._prompt_treatment_patient()
 
         # Layout: buttons cluster on the left, receipt panel on the right
         self.content.grid_columnconfigure(0, weight=1)
@@ -464,7 +601,7 @@ class DashboardFrame(ctk.CTkFrame):
                 corner_radius=18,
                 font=ctk.CTkFont(size=14, weight="bold"),
                 text_color="#0f172a",
-                command=lambda name=label: self._add_treatment_to_receipt(name),
+                command=lambda name=label: self._handle_treatment_click(name),
             ).grid(row=r, column=c, padx=12, pady=12, sticky="nsew")
 
         receipt = ctk.CTkFrame(
@@ -752,6 +889,9 @@ class DashboardFrame(ctk.CTkFrame):
             width=100,
             command=self._show_add_patient_modal,
         ).grid(row=0, column=0, padx=0, pady=0, sticky="e")
+
+        self.status_patients = ctk.CTkLabel(self.content, text="", text_color="orange")
+        self.status_patients.grid(row=5, column=0, padx=12, pady=(4, 0), sticky="w")
 
     def _render_appointments(self) -> None:
         """Display appointments table."""
