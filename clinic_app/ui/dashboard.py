@@ -1,5 +1,7 @@
 import customtkinter as ctk
 import tkinter as tk
+import datetime
+import calendar
 
 from clinic_app.logic.treatment import get_basic_treatment
 from clinic_app.db_mysql import (
@@ -141,7 +143,7 @@ class DashboardFrame(ctk.CTkFrame):
         ctk.CTkLabel(top, text="Total due:", font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=0, padx=12, pady=(12, 4), sticky="w"
         )
-        ctk.CTkLabel(top, text=f"₱{total_due:,.2f}").grid(
+        ctk.CTkLabel(top, text=f"\u20B1{total_due:,.2f}").grid(
             row=0, column=1, padx=12, pady=(12, 4), sticky="e"
         )
 
@@ -175,11 +177,12 @@ class DashboardFrame(ctk.CTkFrame):
             row=2, column=0, columnspan=2, padx=12, pady=12, sticky="ew"
         )
 
+    
     def _update_receipt(self) -> None:
         """Render receipt text from selected treatments."""
         if not hasattr(self, "receipt_box"):
             return
-        lines = []
+        lines: list[str] = []
         lines.append("-" * 57)
         lines.append("TREATMENT DETAILS")
         lines.append("-" * 57)
@@ -208,6 +211,22 @@ class DashboardFrame(ctk.CTkFrame):
         self.receipt_box.delete("1.0", "end")
         self.receipt_box.insert("1.0", "\n".join(lines))
         self.receipt_box.configure(state="disabled")
+
+    def _focus_note(self) -> None:
+        if hasattr(self, "treatment_note"):
+            self.treatment_note.focus_set()
+
+    def _clear_note_placeholder(self, event=None) -> None:
+        if hasattr(self, "treatment_note"):
+            text = self.treatment_note.get("1.0", "end").strip()
+            if text == self._note_placeholder:
+                self.treatment_note.delete("1.0", "end")
+
+    def _restore_note_placeholder(self, event=None) -> None:
+        if hasattr(self, "treatment_note"):
+            text = self.treatment_note.get("1.0", "end").strip()
+            if not text:
+                self.treatment_note.insert("1.0", self._note_placeholder)
 
     def _prompt_patient_field(self, field: str) -> None:
         """Ask for a patient field value and store it temporarily."""
@@ -254,39 +273,71 @@ class DashboardFrame(ctk.CTkFrame):
 
         modal = ctk.CTkToplevel(self)
         modal.title("Select patient and dentist")
-        modal.geometry("360x240")
+        modal.geometry("420x320")
         modal.grab_set()
         modal.grid_columnconfigure(0, weight=1)
+        modal.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(modal, text="Choose patient for treatments:").grid(
-            row=0, column=0, padx=12, pady=(12, 4), sticky="w"
+            row=0, column=0, columnspan=2, padx=12, pady=(12, 4), sticky="w"
         )
         combo_patient = ctk.CTkComboBox(modal, values=names, state="readonly")
         combo_patient.set(names[0])
-        combo_patient.grid(row=1, column=0, padx=12, pady=4, sticky="ew")
+        combo_patient.grid(row=1, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
 
         ctk.CTkLabel(modal, text="Choose dentist:").grid(
-            row=2, column=0, padx=12, pady=(12, 4), sticky="w"
+            row=2, column=0, columnspan=2, padx=12, pady=(12, 4), sticky="w"
         )
         combo_dentist = ctk.CTkComboBox(modal, values=dentist_names, state="readonly")
         combo_dentist.set(dentist_names[0])
-        combo_dentist.grid(row=3, column=0, padx=12, pady=4, sticky="ew")
+        combo_dentist.grid(row=3, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
+
+        sched_frame = ctk.CTkFrame(modal, fg_color="transparent")
+        sched_frame.grid(row=4, column=0, columnspan=2, padx=12, pady=(12, 4), sticky="ew")
+        sched_frame.grid_columnconfigure(1, weight=1)
+        sched_frame.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(sched_frame, text="Select schedule:").grid(
+            row=0, column=0, padx=(0, 8), pady=(0, 4), sticky="w"
+        )
+        sched_date = ctk.CTkEntry(sched_frame, placeholder_text="YYYY-MM-DD")
+        sched_date.grid(row=0, column=1, padx=(0, 4), pady=(0, 4), sticky="ew")
+        ctk.CTkButton(
+            sched_frame,
+            text="Cal",
+            width=40,
+            command=lambda ent=sched_date: self._show_calendar_modal(ent),
+        ).grid(row=0, column=2, padx=(0, 8), pady=(0, 4), sticky="w")
+        sched_time = ctk.CTkEntry(sched_frame, placeholder_text="HH:MM AM/PM")
+        sched_time.grid(row=0, column=3, padx=(0, 4), pady=(0, 4), sticky="ew")
+        ctk.CTkButton(
+            sched_frame,
+            text="Time",
+            width=40,
+            command=lambda ent=sched_time: self._show_time_modal(ent),
+        ).grid(row=0, column=4, padx=(0, 0), pady=(0, 4), sticky="w")
 
         status_lbl = ctk.CTkLabel(modal, text="", text_color="orange")
-        status_lbl.grid(row=4, column=0, padx=12, pady=(4, 0), sticky="w")
+        status_lbl.grid(row=6, column=0, columnspan=2, padx=12, pady=(4, 0), sticky="w")
 
         def confirm_patient() -> None:
             pval = combo_patient.get().strip()
             dval = combo_dentist.get().strip()
+            sdate = sched_date.get().strip()
+            stime = sched_time.get().strip()
             if not pval:
                 status_lbl.configure(text="Select a patient.")
                 return
             if not dval:
                 status_lbl.configure(text="Select a dentist.")
                 return
+            if not sdate or not stime:
+                status_lbl.configure(text="Enter schedule date/time.")
+                return
             self.treatment_patient_name = pval
             self.treatment_dentist_name = dval
-            self.status.configure(text=f"Patient: {pval} | Dentist: {dval}")
+            self.treatment_schedule = f"{sdate} {stime}"
+            self.status.configure(text=f"Patient: {pval} | Dentist: {dval} | Schedule: {self.treatment_schedule}")
             modal.destroy()
 
         ctk.CTkButton(
@@ -296,7 +347,106 @@ class DashboardFrame(ctk.CTkFrame):
             hover_color="#0c2340",
             text_color="#ffffff",
             command=confirm_patient,
-        ).grid(row=5, column=0, padx=12, pady=12, sticky="ew")
+        ).grid(row=7, column=0, columnspan=2, padx=12, pady=12, sticky="ew")
+
+    def _show_calendar_modal(self, target_entry: ctk.CTkEntry) -> None:
+        """Simple calendar picker to fill YYYY-MM-DD."""
+        today = datetime.date.today()
+        year = today.year
+        month = today.month
+
+        top = ctk.CTkToplevel(self)
+        top.title("Pick a date")
+        top.geometry("340x320")
+        top.grab_set()
+        top.grid_columnconfigure((0, 1, 2, 3, 4, 5, 6), weight=1)
+
+        header = ctk.CTkLabel(top, text="")
+        header.grid(row=0, column=0, columnspan=7, pady=(8, 4))
+
+        def render(y: int, m: int) -> None:
+            header.configure(text=f"{calendar.month_name[m]} {y}")
+            # clear old day buttons
+            for widget in top.grid_slaves():
+                info = widget.grid_info()
+                if int(info.get('row', 1)) >= 2:
+                    widget.destroy()
+            month_cal = calendar.monthcalendar(y, m)
+            weekdays = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
+            for idx, wd in enumerate(weekdays):
+                ctk.CTkLabel(top, text=wd, text_color="#9ca3af").grid(row=1, column=idx, pady=2)
+            for r, week in enumerate(month_cal, start=2):
+                for c, day in enumerate(week):
+                    if day == 0:
+                        continue
+                    btn = ctk.CTkButton(
+                        top,
+                        text=str(day),
+                        width=32,
+                        fg_color="#1f2937",
+                        hover_color="#0b1220",
+                        command=lambda d=day, yy=y, mm=m: pick(yy, mm, d),
+                    )
+                    btn.grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
+
+        def pick(y: int, m: int, d: int) -> None:
+            target_entry.delete(0, "end")
+            target_entry.insert(0, f"{y:04d}-{m:02d}-{d:02d}")
+            top.destroy()
+
+        def shift(delta: int) -> None:
+            nonlocal year, month
+            month += delta
+            if month < 1:
+                month, year = 12, year - 1
+            elif month > 12:
+                month, year = 1, year + 1
+            render(year, month)
+
+        ctk.CTkButton(top, text="<", width=32, command=lambda: shift(-1)).grid(row=0, column=0, pady=(8, 4))
+        ctk.CTkButton(top, text=">", width=32, command=lambda: shift(1)).grid(row=0, column=6, pady=(8, 4))
+
+        render(year, month)
+
+    def _show_time_modal(self, target_entry: ctk.CTkEntry) -> None:
+        """Time picker with hour/minute and AM/PM."""
+        top = ctk.CTkToplevel(self)
+        top.title("Pick time")
+        top.geometry("260x180")
+        top.grab_set()
+        top.grid_columnconfigure(0, weight=1)
+        top.grid_columnconfigure(1, weight=1)
+        top.grid_columnconfigure(2, weight=1)
+
+        hours = [f"{h:02d}" for h in range(1, 13)]
+        minutes = [f"{m:02d}" for m in range(0, 60, 5)]
+        meridiem = ["AM", "PM"]
+
+        ctk.CTkLabel(top, text="Hour").grid(row=0, column=0, padx=8, pady=(10, 2), sticky="w")
+        ctk.CTkLabel(top, text="Min").grid(row=0, column=1, padx=8, pady=(10, 2), sticky="w")
+        ctk.CTkLabel(top, text="AM/PM").grid(row=0, column=2, padx=8, pady=(10, 2), sticky="w")
+
+        combo_h = ctk.CTkComboBox(top, values=hours, state="readonly")
+        combo_h.set(hours[0])
+        combo_h.grid(row=1, column=0, padx=8, pady=4, sticky="ew")
+
+        combo_m = ctk.CTkComboBox(top, values=minutes, state="readonly")
+        combo_m.set(minutes[0])
+        combo_m.grid(row=1, column=1, padx=8, pady=4, sticky="ew")
+
+        combo_ap = ctk.CTkComboBox(top, values=meridiem, state="readonly")
+        combo_ap.set(meridiem[0])
+        combo_ap.grid(row=1, column=2, padx=8, pady=4, sticky="ew")
+
+        def confirm() -> None:
+            time_str = f"{combo_h.get()}:{combo_m.get()} {combo_ap.get()}"
+            target_entry.delete(0, "end")
+            target_entry.insert(0, time_str)
+            top.destroy()
+
+        ctk.CTkButton(top, text="Confirm", command=confirm).grid(
+            row=2, column=0, columnspan=3, padx=12, pady=12, sticky="ew"
+        )
 
     def _show_add_patient_modal(self) -> None:
         """Modal to capture new patient info."""
@@ -603,6 +753,33 @@ class DashboardFrame(ctk.CTkFrame):
                 text_color="#0f172a",
                 command=lambda name=label: self._handle_treatment_click(name),
             ).grid(row=r, column=c, padx=12, pady=12, sticky="nsew")
+
+        # Add note pill
+        ctk.CTkButton(
+            tray,
+            text="add note",
+            fg_color="#2f3440",
+            hover_color="#1f2937",
+            text_color="#dcd7b1",
+            corner_radius=18,
+            width=90,
+            height=32,
+            command=self._focus_note,
+        ).grid(row=3, column=0, columnspan=2, padx=12, pady=(0, 4), sticky="w")
+
+        note_frame = ctk.CTkFrame(tray, fg_color="#ffffff", corner_radius=18)
+        note_frame.grid(row=4, column=0, columnspan=2, padx=12, pady=12, sticky="nsew")
+        note_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(note_frame, text="Note", text_color="#0f172a").grid(
+            row=0, column=0, padx=8, pady=(8, 4), sticky="w"
+        )
+        self.treatment_note = ctk.CTkTextbox(note_frame, fg_color="#f5f5f5", text_color="#0f172a", height=80)
+        self.treatment_note.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="nsew")
+        # placeholder behavior
+        self._note_placeholder = "type note..."
+        self.treatment_note.insert("1.0", self._note_placeholder)
+        self.treatment_note.bind("<FocusIn>", self._clear_note_placeholder)
+        self.treatment_note.bind("<FocusOut>", self._restore_note_placeholder)
 
         receipt = ctk.CTkFrame(
             self.content,
