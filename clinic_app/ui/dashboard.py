@@ -304,7 +304,7 @@ class DashboardFrame(ctk.CTkFrame):
         sched_date.grid(row=0, column=1, padx=(0, 4), pady=(0, 4), sticky="ew")
         ctk.CTkButton(
             sched_frame,
-            text="Cal",
+            text="📅",
             width=40,
             command=lambda ent=sched_date: self._show_calendar_modal(ent),
         ).grid(row=0, column=2, padx=(0, 8), pady=(0, 4), sticky="w")
@@ -312,7 +312,7 @@ class DashboardFrame(ctk.CTkFrame):
         sched_time.grid(row=0, column=3, padx=(0, 4), pady=(0, 4), sticky="ew")
         ctk.CTkButton(
             sched_frame,
-            text="Time",
+            text="⏰",
             width=40,
             command=lambda ent=sched_time: self._show_time_modal(ent),
         ).grid(row=0, column=4, padx=(0, 0), pady=(0, 4), sticky="w")
