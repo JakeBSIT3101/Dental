@@ -2,6 +2,13 @@ import customtkinter as ctk
 import tkinter as tk
 import datetime
 import calendar
+import random
+import string
+from pathlib import Path
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 from clinic_app.logic.treatment import get_basic_treatment
 from clinic_app.db_mysql import (
@@ -10,6 +17,11 @@ from clinic_app.db_mysql import (
     fetch_dentists,
     fetch_treatments,
     insert_patient,
+    insert_appointment,
+    insert_payment,
+    insert_patient_history,
+    fetch_patient_history,
+    fetch_payments,
 )
 
 
@@ -49,6 +61,9 @@ class DashboardFrame(ctk.CTkFrame):
         self.patient_input_data: dict[str, str] = {}
         self.treatment_patient_name: str | None = None
         self.treatment_dentist_name: str | None = None
+        self.treatment_patient_id: int | None = None
+        self.treatment_dentist_id: int | None = None
+        self.treatment_schedule: str | None = None
 
         toggle_btn = ctk.CTkButton(
             top_bar,
@@ -131,6 +146,16 @@ class DashboardFrame(ctk.CTkFrame):
                 return
         self._add_treatment_to_receipt(name)
 
+    def _remove_latest_treatment(self) -> None:
+        """Remove the most recently added treatment from the receipt."""
+        if not self.selected_treatments:
+            self.status.configure(text="No treatments to remove.")
+            return
+        self.selected_treatments.pop()
+        self.payment_amount = 0.0  # reset payment when items change
+        self._update_receipt()
+        self.status.configure(text="Last treatment removed.")
+
     def _show_payment_modal(self) -> None:
         """Prompt for payment amount and update receipt."""
         total_due = getattr(self, "current_total", 0.0)
@@ -165,12 +190,53 @@ class DashboardFrame(ctk.CTkFrame):
             if amt < total_due:
                 status_lbl.configure(text="Insufficient payment.")
                 return
+            if not self.treatment_patient_id or not self.treatment_dentist_id:
+                status_lbl.configure(text="Select patient and dentist first.")
+                return
+            if not self.treatment_schedule:
+                status_lbl.configure(text="Provide schedule before payment.")
+                return
+
+            reason = ", ".join(item["name"] for item in self.selected_treatments) or "Treatment"
+            note_text = ""
+            if hasattr(self, "treatment_note"):
+                note_text = self.treatment_note.get("1.0", "end").strip()
+                if note_text == getattr(self, "_note_placeholder", ""):
+                    note_text = ""
+            created_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            ok_ins, msg_ins, appt_id = insert_appointment(
+                self.treatment_patient_id,
+                self.treatment_dentist_id,
+                self.treatment_schedule,
+                "scheduled",
+                reason,
+                note_text,
+                created_at,
+            )
+            if not ok_ins or not appt_id:
+                status_lbl.configure(text=msg_ins)
+                return
+
+            ref = "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+            ok_pay, msg_pay = insert_payment(
+                appointment_id=appt_id,
+                patient_id=self.treatment_patient_id,
+                amount=amt,
+                method="cash",
+                status="paid",
+                reference_no=ref,
+                remarks="Dr. Paolo De Leon",
+            )
+            if not ok_pay:
+                status_lbl.configure(text=msg_pay)
+                return
             # Successful payment: clear receipt.
             self.payment_amount = 0.0
             self.selected_treatments = []
             self.current_total = 0.0
             self._update_receipt()
-            self.status.configure(text="Payment accepted; receipt cleared.")
+            self.status.configure(text="Payment saved and receipt cleared.")
             top.destroy()
 
         ctk.CTkButton(top, text="Confirm", command=do_pay).grid(
@@ -249,12 +315,16 @@ class DashboardFrame(ctk.CTkFrame):
             self.status.configure(text=msg or "No patients available.")
             return
         names = []
+        patient_map: dict[str, int] = {}
         for r in rows:
             full_name = f"{r.get('first_name','').strip()} {r.get('last_name','').strip()}".strip()
             if full_name:
                 names.append(full_name)
+                if r.get("patient_id") is not None:
+                    patient_map[full_name] = r.get("patient_id")
         ok_den, msg_den, dentists = fetch_dentists()
         dentist_names = []
+        dentist_map: dict[str, int] = {}
         if ok_den and dentists:
             for r in dentists:
                 name = (
@@ -264,6 +334,8 @@ class DashboardFrame(ctk.CTkFrame):
                 ).strip()
                 if name:
                     dentist_names.append(name)
+                    if r.get("dentist_id") is not None:
+                        dentist_map[name] = r.get("dentist_id")
         if not names:
             self.status.configure(text="No patients available.")
             return
@@ -278,12 +350,40 @@ class DashboardFrame(ctk.CTkFrame):
         modal.grid_columnconfigure(0, weight=1)
         modal.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(modal, text="Choose patient for treatments:").grid(
-            row=0, column=0, columnspan=2, padx=12, pady=(12, 4), sticky="w"
-        )
+        # Row: patient label + add button
+        patient_bar = ctk.CTkFrame(modal, fg_color="transparent")
+        patient_bar.grid(row=0, column=0, columnspan=3, padx=12, pady=(12, 4), sticky="ew")
+        patient_bar.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(patient_bar, text="Choose patient for treatments:").grid(row=0, column=0, sticky="w")
+        def _refresh_lists():
+            ok_new, _, new_rows = fetch_patients()
+            if ok_new and new_rows:
+                new_names = []
+                patient_map.clear()
+                for r in new_rows:
+                    nm = f"{r.get('first_name','').strip()} {r.get('last_name','').strip()}".strip()
+                    if nm:
+                        new_names.append(nm)
+                        if r.get("patient_id") is not None:
+                            patient_map[nm] = r.get("patient_id")
+                if new_names:
+                    combo_patient.configure(values=new_names)
+                    combo_patient.set(new_names[0])
+            return
+        ctk.CTkButton(
+            patient_bar,
+            text="+",
+            width=32,
+            height=32,
+            fg_color="#0ea5e9",
+            hover_color="#0284c7",
+            text_color="#ffffff",
+            command=lambda: (self._show_add_patient_modal(), self.after(500, _refresh_lists)),
+        ).grid(row=0, column=1, padx=(8, 0), sticky="e")
+
         combo_patient = ctk.CTkComboBox(modal, values=names, state="readonly")
         combo_patient.set(names[0])
-        combo_patient.grid(row=1, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
+        combo_patient.grid(row=1, column=0, columnspan=3, padx=12, pady=4, sticky="ew")
 
         ctk.CTkLabel(modal, text="Choose dentist:").grid(
             row=2, column=0, columnspan=2, padx=12, pady=(12, 4), sticky="w"
@@ -336,8 +436,12 @@ class DashboardFrame(ctk.CTkFrame):
                 return
             self.treatment_patient_name = pval
             self.treatment_dentist_name = dval
+            self.treatment_patient_id = patient_map.get(pval)
+            self.treatment_dentist_id = dentist_map.get(dval)
             self.treatment_schedule = f"{sdate} {stime}"
-            self.status.configure(text=f"Patient: {pval} | Dentist: {dval} | Schedule: {self.treatment_schedule}")
+            self.status.configure(
+                text=f"Patient: {pval} | Dentist: {dval} | Schedule: {self.treatment_schedule}"
+            )
             modal.destroy()
 
         ctk.CTkButton(
@@ -575,6 +679,8 @@ class DashboardFrame(ctk.CTkFrame):
             self._render_treatments()
         elif name.lower().startswith("appoint"):
             self._render_appointments()
+        elif name.lower().startswith("payment"):
+            self._render_payment_history()
         else:
             self._render_dashboard()
 
@@ -614,63 +720,22 @@ class DashboardFrame(ctk.CTkFrame):
             text="Enter patient age and visit reason to draft a simple plan.",
         ).grid(row=1, column=0, padx=12, pady=(0, 12), sticky="w")
 
-        analytics = ctk.CTkFrame(self.content, fg_color="#0f172a")
-        analytics.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="ew")
-        for i, (title, value, note) in enumerate(
-            [
-                ("Appointments today", "18", "6 awaiting confirmation"),
-                ("Active patients", "342", "Updated this week"),
-                ("Open balances", "$12.4k", "Billing follow-ups"),
-            ]
-        ):
-            card = ctk.CTkFrame(analytics, corner_radius=10)
-            card.grid(row=0, column=i, padx=8, pady=8, sticky="nsew")
-            analytics.grid_columnconfigure(i, weight=1)
-            ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=12)).grid(
-                row=0, column=0, padx=10, pady=(10, 4), sticky="w"
-            )
+        logo_frame = ctk.CTkFrame(self.content, fg_color="#0b1220", corner_radius=12)
+        logo_frame.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        logo_frame.grid_columnconfigure(0, weight=1)
+        logo_frame.grid_rowconfigure(0, weight=1)
+        logo_path = Path(__file__).resolve().parent.parent / "assets" / "logo.png"
+        if Image and logo_path.exists():
+            img = Image.open(logo_path)
+            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(320, 320))
+            ctk.CTkLabel(logo_frame, image=ctk_img, text="").grid(row=0, column=0, padx=12, pady=12)
+        else:
             ctk.CTkLabel(
-                card,
-                text=value,
-                font=ctk.CTkFont(size=22, weight="bold"),
-            ).grid(row=1, column=0, padx=10, pady=(0, 2), sticky="w")
-            ctk.CTkLabel(
-                card,
-                text=note,
-                font=ctk.CTkFont(size=11),
-                text_color="#94a3b8",
-            ).grid(row=2, column=0, padx=10, pady=(0, 10), sticky="w")
-
-        graphs = ctk.CTkFrame(self.content, fg_color="#0b1220")
-        graphs.grid(row=3, column=0, padx=12, pady=(0, 12), sticky="ew")
-        graphs.grid_columnconfigure((0, 1), weight=1)
-
-        line_wrap = ctk.CTkFrame(graphs, corner_radius=10)
-        line_wrap.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
-        ctk.CTkLabel(
-            line_wrap, text="Checkups trend", font=ctk.CTkFont(size=12, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
-        line_canvas = tk.Canvas(line_wrap, width=360, height=180, bg="#0f172a", highlightthickness=0)
-        line_canvas.grid(row=1, column=0, padx=10, pady=8, sticky="nsew")
-        self._draw_line_chart(line_canvas, [12, 18, 22, 19, 25, 28, 26])
-
-        pie_wrap = ctk.CTkFrame(graphs, corner_radius=10)
-        pie_wrap.grid(row=0, column=1, padx=8, pady=8, sticky="nsew")
-        ctk.CTkLabel(
-            pie_wrap, text="Visit reasons", font=ctk.CTkFont(size=12, weight="bold")
-        ).grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
-        pie_canvas = tk.Canvas(pie_wrap, width=260, height=180, bg="#0f172a", highlightthickness=0)
-        pie_canvas.grid(row=1, column=0, padx=10, pady=8, sticky="nsew")
-        self._draw_pie_chart(
-            pie_canvas,
-            {
-                "checkup": ("#22d3ee", 35),
-                "cleaning": ("#60a5fa", 25),
-                "toothache": ("#f97316", 20),
-                "braces": ("#a78bfa", 12),
-                "other": ("#4ade80", 8),
-            },
-        )
+                logo_frame,
+                text="Dental Clinic",
+                font=ctk.CTkFont(size=28, weight="bold"),
+                text_color="#e5e7eb",
+            ).grid(row=0, column=0, padx=12, pady=24)
 
         form = ctk.CTkFrame(self.content)
         form.grid(row=4, column=0, padx=12, pady=8, sticky="ew")
@@ -706,6 +771,8 @@ class DashboardFrame(ctk.CTkFrame):
         """Show treatment shortcut buttons."""
         self._clear_content()
         self.content.grid_columnconfigure(0, weight=1)
+        self.content.grid_columnconfigure(1, weight=1)
+        self.content.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(
             self.content,
@@ -729,14 +796,13 @@ class DashboardFrame(ctk.CTkFrame):
         # Require patient selection
         self._prompt_treatment_patient()
 
-        # Layout: buttons cluster on the left, receipt panel on the right
-        self.content.grid_columnconfigure(0, weight=1)
-        self.content.grid_columnconfigure(1, weight=2)
-        self.content.grid_rowconfigure(1, weight=1)
-
+        # Layout: buttons cluster on the left, receipt column on the right
         tray = ctk.CTkFrame(self.content, fg_color="transparent")
-        tray.grid(row=1, column=0, padx=(8, 12), pady=(4, 12), sticky="n")
+        tray.grid(row=1, column=0, padx=(8, 12), pady=(4, 12), sticky="nw")
         tray.grid_columnconfigure((0, 1), weight=1)
+        right_col = ctk.CTkFrame(self.content, fg_color="transparent")
+        right_col.grid(row=1, column=1, padx=(12, 16), pady=(4, 12), sticky="nw")
+        right_col.grid_columnconfigure(0, weight=1)
 
         buttons = ["Cleaning", "Fluoride", "Filling", "Extraction", "Dentures"]
         # Left column: 3 buttons; Right column: 2 buttons stacked at top.
@@ -781,26 +847,43 @@ class DashboardFrame(ctk.CTkFrame):
         self.treatment_note.bind("<FocusIn>", self._clear_note_placeholder)
         self.treatment_note.bind("<FocusOut>", self._restore_note_placeholder)
 
-        receipt = ctk.CTkFrame(
-            self.content,
-            fg_color="#ffffff",
-            corner_radius=18,
-        )
-        receipt.grid(row=1, column=1, padx=(12, 16), pady=(4, 12), sticky="nsew")
-        receipt.grid_columnconfigure(0, weight=1)
-        receipt.grid_columnconfigure(1, weight=0)
-        receipt.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(receipt, text="RECEIPT", text_color="#0f172a").grid(
-            row=0, column=0, padx=12, pady=(12, 4), sticky="w"
-        )
+        # Action bar above receipt
+        bar = ctk.CTkFrame(right_col, fg_color="transparent")
+        bar.grid(row=0, column=0, padx=0, pady=(0, 4), sticky="w")
         ctk.CTkButton(
-            receipt,
+            bar,
+            text="Remove",
+            fg_color="#dc2626",
+            hover_color="#b91c1c",
+            text_color="#ffffff",
+            corner_radius=14,
+            width=120,
+            height=36,
+            command=self._remove_latest_treatment,
+        ).grid(row=0, column=0, padx=(0, 8), pady=0)
+        ctk.CTkButton(
+            bar,
             text="Pay",
             fg_color="#123055",
             hover_color="#0c2340",
             text_color="#ffffff",
+            corner_radius=14,
+            width=120,
+            height=36,
             command=self._show_payment_modal,
-        ).grid(row=0, column=1, padx=12, pady=(12, 4), sticky="e")
+        ).grid(row=0, column=1, padx=(0, 0), pady=0)
+
+        receipt = ctk.CTkFrame(
+            right_col,
+            fg_color="#ffffff",
+            corner_radius=18,
+        )
+        receipt.grid(row=1, column=0, padx=0, pady=(0, 0), sticky="nsew")
+        receipt.grid_columnconfigure(0, weight=1)
+        receipt.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(receipt, text="RECEIPT", text_color="#0f172a").grid(
+            row=0, column=0, padx=12, pady=(12, 4), sticky="w"
+        )
         self.receipt_box = ctk.CTkTextbox(
             receipt,
             fg_color="#ffffff",
@@ -826,43 +909,60 @@ class DashboardFrame(ctk.CTkFrame):
             font=ctk.CTkFont(size=20, weight="bold"),
         ).grid(row=0, column=0, padx=12, pady=(0, 8), sticky="w")
 
-        ok, msg, rows = fetch_patients()
-        if not ok:
-            ctk.CTkLabel(self.content, text=msg, text_color="orange").grid(
+        ok_hist, msg_hist, hist_rows = fetch_patient_history()
+        if not ok_hist:
+            ctk.CTkLabel(self.content, text=msg_hist, text_color="orange").grid(
                 row=1, column=0, padx=12, pady=12, sticky="w"
             )
             return
 
-        # Search bar
+        ok_pat, _, patient_rows = fetch_patients()
+        ok_app, _, appt_rows = fetch_appointments()
+        patient_map = {}
+        if ok_pat and patient_rows:
+            for r in patient_rows:
+                pid = r.get("patient_id")
+                name = f"{r.get('first_name','').strip()} {r.get('last_name','').strip()}".strip()
+                patient_map[pid] = name or str(pid)
+        appt_map = {}
+        if ok_app and appt_rows:
+            for r in appt_rows:
+                appt_map[r.get("appointment_id")] = r
+
         search_frame = ctk.CTkFrame(self.content, fg_color="transparent")
         search_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
         search_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(search_frame, text="Search:").grid(row=0, column=0, padx=(0, 8), pady=4, sticky="w")
-        search_entry = ctk.CTkEntry(search_frame, placeholder_text="Type to filter patients")
+        search_entry = ctk.CTkEntry(search_frame, placeholder_text="Type to filter history")
         search_entry.grid(row=0, column=1, padx=(0, 8), pady=4, sticky="ew")
 
         scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
         scroll.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
         scroll.grid_columnconfigure(0, weight=1)
+        scroll.grid_rowconfigure(0, weight=1)
+        scroll.grid_rowconfigure(0, weight=1)
 
-        if not rows:
-            ctk.CTkLabel(scroll, text="No patient records found.").grid(
-                row=0, column=0, padx=8, pady=8, sticky="w"
-            )
-            return
-
-        # Define table columns (tailored, ordered)
         columns = [
-            ("name", "Name", 2),
-            ("birth_date", "Birth date", 2),
-            ("age_group", "Age group", 1),
-            ("gender", "Gender", 1),
-            ("phone", "Phone", 2),
-            ("address", "Address", 3),
-            ("created_at", "Created", 2),
+            ("patient", "Patient", 2),
+            ("visit_date", "Visit date", 1),
+            ("diagnosis", "Diagnosis", 2),
+            ("treatment_given", "Treatment", 2),
+            ("prescription", "Prescription", 2),
+            ("follow_up_date", "Follow-up", 1),
+            ("notes", "Notes", 3),
+            ("appointment", "Appointment", 2),
         ]
+        minsize = {
+            "patient": 180,
+            "visit_date": 160,
+            "diagnosis": 180,
+            "treatment_given": 200,
+            "prescription": 200,
+            "follow_up_date": 160,
+            "notes": 260,
+            "appointment": 200,
+        }
 
-        # Table container with light style
         table = ctk.CTkFrame(
             scroll,
             corner_radius=6,
@@ -870,13 +970,146 @@ class DashboardFrame(ctk.CTkFrame):
             border_width=1,
             border_color="#e5e7eb",
         )
-        table.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+        table.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
         table.grid_columnconfigure(tuple(range(len(columns))), weight=1)
 
         header_font = ctk.CTkFont(size=12, weight="bold")
         cell_font = ctk.CTkFont(size=12)
 
-        # Header row
+        for c_idx, (key, header, weight) in enumerate(columns):
+            table.grid_columnconfigure(c_idx, weight=weight, minsize=minsize.get(key, 120))
+            ctk.CTkLabel(
+                table,
+                text=header,
+                font=header_font,
+                text_color="#111827",
+                fg_color="#f5f5f5",
+            ).grid(row=0, column=c_idx, padx=4, pady=4, sticky="nsew")
+
+        self.history_rows = hist_rows or []
+
+        def build_table(row_data: list[dict]) -> None:
+            for child in table.grid_slaves():
+                if int(child.grid_info().get("row", 1)) > 0:
+                    child.destroy()
+
+            if not row_data:
+                ctk.CTkLabel(table, text="No history records match.").grid(
+                    row=1, column=0, padx=8, pady=8, sticky="w", columnspan=len(columns)
+                )
+                return
+
+            for r_idx, row in enumerate(row_data, start=1):
+                bg = "#ffffff" if r_idx % 2 else "#f9fafb"
+                pid = row.get("patient_id")
+                patient_name = patient_map.get(pid, pid)
+                appt = appt_map.get(row.get("appointment_id"))
+                appt_label = ""
+                if appt:
+                    appt_label = f"{appt.get('scheduled_at','')}"
+                values = {
+                    "patient": patient_name,
+                    "visit_date": row.get("visit_date", ""),
+                    "diagnosis": row.get("diagnosis", ""),
+                    "treatment_given": row.get("treatment_given", ""),
+                    "prescription": row.get("prescription", ""),
+                    "follow_up_date": row.get("follow_up_date", ""),
+                    "notes": row.get("notes", ""),
+                    "appointment": appt_label,
+                }
+                for c_idx, (key, _, _) in enumerate(columns):
+                    ctk.CTkLabel(
+                        table,
+                        text=str(values.get(key, "")),
+                        font=cell_font,
+                        text_color="#111827",
+                        anchor="w",
+                        fg_color=bg,
+                    ).grid(row=r_idx, column=c_idx, padx=4, pady=4, sticky="nsew")
+
+        build_table(self.history_rows)
+
+        def apply_filter(*_args) -> None:
+            term = search_entry.get().strip().lower()
+            if not term:
+                filtered = self.history_rows
+            else:
+                filtered = []
+                for r in self.history_rows:
+                    haystack = " ".join(str(v) for v in r.values()).lower()
+                    if term in haystack:
+                        filtered.append(r)
+            build_table(filtered)
+
+        search_entry.bind("<KeyRelease>", apply_filter)
+
+    def _render_payment_history(self) -> None:
+        """Display payments table."""
+        self._clear_content()
+        self.content.grid_columnconfigure(0, weight=1)
+        self.content.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            self.content,
+            text="Payment history",
+            font=ctk.CTkFont(size=20, weight="bold"),
+        ).grid(row=0, column=0, padx=12, pady=(0, 8), sticky="w")
+
+        ok_pay, msg_pay, pay_rows = fetch_payments()
+        if not ok_pay:
+            ctk.CTkLabel(self.content, text=msg_pay, text_color="orange").grid(
+                row=1, column=0, padx=12, pady=12, sticky="w"
+            )
+            return
+
+        ok_pat, _, patient_rows = fetch_patients()
+        ok_app, _, appt_rows = fetch_appointments()
+        patient_map = {}
+        if ok_pat and patient_rows:
+            for r in patient_rows:
+                pid = r.get("patient_id")
+                name = f"{r.get('first_name','').strip()} {r.get('last_name','').strip()}".strip()
+                patient_map[pid] = name or str(pid)
+        appt_map = {}
+        if ok_app and appt_rows:
+            for r in appt_rows:
+                appt_map[r.get("appointment_id")] = r
+
+        search_frame = ctk.CTkFrame(self.content, fg_color="transparent")
+        search_frame.grid(row=1, column=0, padx=12, pady=(0, 8), sticky="ew")
+        search_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(search_frame, text="Search:").grid(row=0, column=0, padx=(0, 8), pady=4, sticky="w")
+        search_entry = ctk.CTkEntry(search_frame, placeholder_text="Type to filter payments")
+        search_entry.grid(row=0, column=1, padx=(0, 8), pady=4, sticky="ew")
+
+        scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        scroll.grid(row=2, column=0, padx=12, pady=(0, 12), sticky="nsew")
+        scroll.grid_columnconfigure(0, weight=1)
+
+        columns = [
+            ("patient", "Patient", 2),
+            ("appointment", "Appointment", 2),
+            ("amount", "Amount", 1),
+            ("payment_date", "Payment date", 2),
+            ("method", "Method", 1),
+            ("status", "Status", 1),
+            ("reference_no", "Reference", 2),
+            ("remarks", "Remarks", 2),
+        ]
+
+        table = ctk.CTkFrame(
+            scroll,
+            corner_radius=6,
+            fg_color="#ffffff",
+            border_width=1,
+            border_color="#e5e7eb",
+        )
+        table.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
+        table.grid_columnconfigure(tuple(range(len(columns))), weight=1)
+
+        header_font = ctk.CTkFont(size=12, weight="bold")
+        cell_font = ctk.CTkFont(size=12)
+
         for c_idx, (_, header, weight) in enumerate(columns):
             table.grid_columnconfigure(c_idx, weight=weight)
             ctk.CTkLabel(
@@ -885,54 +1118,62 @@ class DashboardFrame(ctk.CTkFrame):
                 font=header_font,
                 text_color="#111827",
                 fg_color="#f5f5f5",
-                corner_radius=0,
             ).grid(row=0, column=c_idx, padx=4, pady=4, sticky="nsew")
 
-        # Body rows
-        for r_idx, row in enumerate(rows, start=1):
-            bg = "#ffffff" if r_idx % 2 else "#f9fafb"
-            # Derived fields
-            full_name = f"{row.get('first_name','').strip()} {row.get('last_name','').strip()}".strip()
-            values = {
-                "name": full_name or row.get("first_name", "") or row.get("last_name", ""),
-                "birth_date": row.get("birth_date", ""),
-                "age_group": row.get("age_group", ""),
-                "gender": row.get("gender", ""),
-                "phone": row.get("phone", ""),
-                "address": row.get("address", ""),
-                "created_at": row.get("created_at", ""),
-            }
+        self.pay_rows = pay_rows or []
 
-            for c_idx, (key, _, _) in enumerate(columns):
-                text = values.get(key, "")
-                ctk.CTkLabel(
-                    table,
-                    text=str(text),
-                    font=cell_font,
-                    text_color="#111827",
-                    anchor="w",
-                    fg_color=bg,
-                    corner_radius=0,
-                ).grid(row=r_idx, column=c_idx, padx=4, pady=4, sticky="nsew")
+        def build_table(row_data: list[dict]) -> None:
+            for child in table.grid_slaves():
+                if int(child.grid_info().get("row", 1)) > 0:
+                    child.destroy()
+
+            if not row_data:
+                ctk.CTkLabel(table, text="No payment records match.").grid(
+                    row=1, column=0, padx=8, pady=8, sticky="w", columnspan=len(columns)
+                )
+                return
+
+            for r_idx, row in enumerate(row_data, start=1):
+                bg = "#ffffff" if r_idx % 2 else "#f9fafb"
+                pid = row.get("patient_id")
+                patient_name = patient_map.get(pid, pid)
+                appt = appt_map.get(row.get("appointment_id"))
+                appt_label = ""
+                if appt:
+                    appt_label = appt.get("scheduled_at", "")
+                values = {
+                    "patient": patient_name,
+                    "appointment": appt_label,
+                    "amount": row.get("amount", ""),
+                    "payment_date": row.get("payment_date", ""),
+                    "method": row.get("method", ""),
+                    "status": row.get("status", ""),
+                    "reference_no": row.get("reference_no", ""),
+                    "remarks": row.get("remarks", ""),
+                }
+                for c_idx, (key, _, _) in enumerate(columns):
+                    ctk.CTkLabel(
+                        table,
+                        text=str(values.get(key, "")),
+                        font=cell_font,
+                        text_color="#111827",
+                        anchor="w",
+                        fg_color=bg,
+                    ).grid(row=r_idx, column=c_idx, padx=4, pady=4, sticky="nsew")
+
+        build_table(self.pay_rows)
 
         def apply_filter(*_args) -> None:
             term = search_entry.get().strip().lower()
-            for r_idx, row in enumerate(rows, start=1):
-                show = False
-                if not term:
-                    show = True
-                else:
-                    for val in row.values():
-                        if term in str(val).lower():
-                            show = True
-                            break
-                # row index offset by 1 for header
-                widgets = table.grid_slaves(row=r_idx)
-                for w in widgets:
-                    if show:
-                        w.grid()
-                    else:
-                        w.grid_remove()
+            if not term:
+                filtered = self.pay_rows
+            else:
+                filtered = []
+                for r in self.pay_rows:
+                    haystack = " ".join(str(v) for v in r.values()).lower()
+                    if term in haystack:
+                        filtered.append(r)
+            build_table(filtered)
 
         search_entry.bind("<KeyRelease>", apply_filter)
 
@@ -972,6 +1213,25 @@ class DashboardFrame(ctk.CTkFrame):
         self.patient_table_holder = ctk.CTkFrame(scroll, fg_color="transparent")
         self.patient_table_holder.grid(row=0, column=0, sticky="nsew")
 
+        columns = [
+            ("name", "Name", 3),
+            ("birth_date", "Birth date", 2),
+            ("age_group", "Age group", 1),
+            ("gender", "Gender", 1),
+            ("phone", "Phone", 2),
+            ("address", "Address", 4),
+            ("created_at", "Created", 2),
+        ]
+        minsize = {
+            "name": 160,
+            "birth_date": 140,
+            "age_group": 100,
+            "gender": 100,
+            "phone": 150,
+            "address": 240,
+            "created_at": 160,
+        }
+
         def build_table(row_data: list[dict]) -> None:
             for child in self.patient_table_holder.winfo_children():
                 child.destroy()
@@ -981,16 +1241,6 @@ class DashboardFrame(ctk.CTkFrame):
                     row=0, column=0, padx=8, pady=8, sticky="w"
                 )
                 return
-
-            columns = [
-                ("name", "Name", 2),
-                ("birth_date", "Birth date", 2),
-                ("age_group", "Age group", 1),
-                ("gender", "Gender", 1),
-                ("phone", "Phone", 2),
-                ("address", "Address", 3),
-                ("created_at", "Created", 2),
-            ]
 
             table = ctk.CTkFrame(
                 self.patient_table_holder,
@@ -1005,8 +1255,8 @@ class DashboardFrame(ctk.CTkFrame):
             header_font = ctk.CTkFont(size=12, weight="bold")
             cell_font = ctk.CTkFont(size=12)
 
-            for c_idx, (_, header, weight) in enumerate(columns):
-                table.grid_columnconfigure(c_idx, weight=weight)
+            for c_idx, (key, header, weight) in enumerate(columns):
+                table.grid_columnconfigure(c_idx, weight=weight, minsize=minsize.get(key, 120))
                 ctk.CTkLabel(
                     table,
                     text=header,
@@ -1073,7 +1323,12 @@ class DashboardFrame(ctk.CTkFrame):
     def _render_appointments(self) -> None:
         """Display appointments table."""
         self._clear_content()
+        # Reset grid weights so leftover layouts (e.g., Treatments two-column) don't compress the table
+        for col in range(3):
+            self.content.grid_columnconfigure(col, weight=0)
         self.content.grid_columnconfigure(0, weight=1)
+        for row in range(3):
+            self.content.grid_rowconfigure(row, weight=0)
         self.content.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(
@@ -1115,6 +1370,7 @@ class DashboardFrame(ctk.CTkFrame):
         scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
         scroll.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
         scroll.grid_columnconfigure(0, weight=1)
+        scroll.grid_rowconfigure(0, weight=1)
 
         if not rows:
             ctk.CTkLabel(scroll, text="No appointments found.").grid(
@@ -1130,6 +1386,14 @@ class DashboardFrame(ctk.CTkFrame):
             ("status", "Status", 1),
             ("created_at", "Created", 2),
         ]
+        minsize = {
+            "patient_name": 200,
+            "dentist_name": 200,
+            "scheduled_at": 220,
+            "reason": 180,
+            "status": 140,
+            "created_at": 200,
+        }
 
         table = ctk.CTkFrame(
             scroll,
@@ -1138,14 +1402,15 @@ class DashboardFrame(ctk.CTkFrame):
             border_width=1,
             border_color="#e5e7eb",
         )
-        table.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+        table.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
         table.grid_columnconfigure(tuple(range(len(columns))), weight=1)
 
         header_font = ctk.CTkFont(size=12, weight="bold")
         cell_font = ctk.CTkFont(size=12)
 
         for c_idx, (_, header, weight) in enumerate(columns):
-            table.grid_columnconfigure(c_idx, weight=weight)
+            key = columns[c_idx][0]
+            table.grid_columnconfigure(c_idx, weight=weight, minsize=minsize.get(key, 140))
             ctk.CTkLabel(
                 table,
                 text=header,
@@ -1177,6 +1442,9 @@ class DashboardFrame(ctk.CTkFrame):
                     anchor="w",
                     fg_color=bg,
                 ).grid(row=r_idx, column=c_idx, padx=4, pady=4, sticky="nsew")
+            # Bind row click to open history modal
+            for child in table.grid_slaves(row=r_idx):
+                child.bind("<Button-1>", lambda _e, appt=row: self._open_history_modal(appt))
 
     def _draw_line_chart(self, canvas: tk.Canvas, values: list[int]) -> None:
         """Draw a simple line chart for the given values."""
@@ -1210,3 +1478,86 @@ class DashboardFrame(ctk.CTkFrame):
             canvas.create_text(h + 32, legend_y + 2, anchor="w", fill="#e5e7eb", text=f"{label} ({val})", font=("Arial", 10))
             start += extent
             legend_y += 20
+
+    def _open_history_modal(self, appt_row: dict) -> None:
+        """Modal to capture diagnosis/follow-up/notes and save to patient_history."""
+        appt_id = appt_row.get("appointment_id")
+        patient_id = appt_row.get("patient_id")
+        sched_raw = str(appt_row.get("scheduled_at") or "")
+        visit_date = ""
+        if sched_raw:
+            visit_date = sched_raw.split(" ")[0]
+
+        top = ctk.CTkToplevel(self)
+        top.title("Add patient history")
+        top.geometry("420x380")
+        top.grab_set()
+        for i in range(2):
+            top.grid_columnconfigure(i, weight=1)
+
+        ctk.CTkLabel(top, text="Diagnosis").grid(row=0, column=0, padx=10, pady=(12, 4), sticky="w")
+        diag_entry = ctk.CTkEntry(top, placeholder_text="Diagnosis")
+        diag_entry.grid(row=0, column=1, padx=10, pady=(12, 4), sticky="ew")
+
+        ctk.CTkLabel(top, text="Follow-up date (YYYY-MM-DD)").grid(row=1, column=0, padx=10, pady=4, sticky="w")
+        follow_entry = ctk.CTkEntry(top, placeholder_text="YYYY-MM-DD")
+        follow_entry.grid(row=1, column=1, padx=10, pady=4, sticky="ew")
+
+        ctk.CTkLabel(top, text="Prescription").grid(row=2, column=0, padx=10, pady=4, sticky="w")
+        rx_entry = ctk.CTkEntry(top, placeholder_text="e.g., Amoxicillin 500mg 3x/day")
+        rx_entry.grid(row=2, column=1, padx=10, pady=4, sticky="ew")
+
+        ctk.CTkLabel(top, text="Notes").grid(row=3, column=0, padx=10, pady=4, sticky="nw")
+        notes_box = ctk.CTkTextbox(top, height=120)
+        notes_box.grid(row=3, column=1, padx=10, pady=4, sticky="nsew")
+        # Show existing notes (if any) for visibility
+        existing_notes = str(appt_row.get("notes") or "").strip()
+        if existing_notes:
+            ctk.CTkLabel(top, text="Existing notes").grid(row=4, column=0, padx=10, pady=(4, 0), sticky="w")
+            existing_box = ctk.CTkTextbox(top, height=60)
+            existing_box.insert("1.0", existing_notes)
+            existing_box.configure(state="disabled")
+            existing_box.grid(row=4, column=1, padx=10, pady=(4, 0), sticky="nsew")
+
+        status_lbl = ctk.CTkLabel(top, text="", text_color="orange")
+        status_row = 5 if existing_notes else 4
+        status_lbl.grid(row=status_row, column=0, columnspan=2, padx=10, pady=(4, 0), sticky="w")
+
+        def save_history() -> None:
+            diag = diag_entry.get().strip()
+            follow = follow_entry.get().strip()
+            notes = notes_box.get("1.0", "end").strip()
+            rx = rx_entry.get().strip()
+            treatment_given = appt_row.get("reason", "")
+            if not patient_id or not appt_id:
+                status_lbl.configure(text="Missing patient or appointment id.")
+                return
+            if not visit_date:
+                status_lbl.configure(text="Missing visit date.")
+                return
+            ok, msg = insert_patient_history(
+                patient_id=patient_id,
+                appointment_id=appt_id,
+                visit_date=visit_date,
+                diagnosis=diag or None,
+                treatment_given=treatment_given or None,
+                prescription=rx or None,
+                follow_up_date=follow or None,
+                notes=notes or None,
+            )
+            if not ok:
+                status_lbl.configure(text=msg)
+                return
+            status_lbl.configure(text="History saved.")
+            top.destroy()
+            # Refresh appointments view to reflect any potential changes
+            self._render_appointments()
+
+        ctk.CTkButton(
+            top,
+            text="Save",
+            fg_color="#123055",
+            hover_color="#0c2340",
+            text_color="#ffffff",
+            command=save_history,
+        ).grid(row=status_row + 1, column=0, columnspan=2, padx=10, pady=12, sticky="ew")

@@ -181,3 +181,172 @@ def fetch_dentists() -> Tuple[bool, str, Optional[list[dict]]]:
             conn.close()
         except Exception:
             pass
+
+
+def insert_appointment(
+    patient_id: int,
+    dentist_id: int,
+    scheduled_at: str,
+    status: str,
+    reason: str,
+    notes: str | None = None,
+    created_at: str | None = None,
+) -> Tuple[bool, str, Optional[int]]:
+    """Insert a new appointment row and return its id."""
+    try:
+        conn = get_connection()
+    except Error as exc:
+        return False, f"DB connection failed: {exc}", None
+
+    try:
+        cur = conn.cursor()
+        if created_at:
+            cur.execute(
+                """
+                INSERT INTO appointments (patient_id, dentist_id, scheduled_at, status, reason, notes, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (patient_id, dentist_id, scheduled_at, status, reason, notes, created_at),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO appointments (patient_id, dentist_id, scheduled_at, status, reason, notes, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                """,
+                (patient_id, dentist_id, scheduled_at, status, reason, notes),
+            )
+        appt_id = cur.lastrowid
+        conn.commit()
+        return True, "Appointment recorded.", appt_id
+    except Error as exc:
+        return False, f"Insert failed: {exc}", None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def insert_payment(
+    appointment_id: int,
+    patient_id: int,
+    amount: float,
+    method: str,
+    status: str,
+    reference_no: str | None = None,
+    remarks: str | None = None,
+    payment_date: str | None = None,
+) -> Tuple[bool, str]:
+    """Insert a new payment row."""
+    try:
+        conn = get_connection()
+    except Error as exc:
+        return False, f"DB connection failed: {exc}"
+
+    try:
+        cur = conn.cursor()
+        if payment_date:
+            cur.execute(
+                """
+                INSERT INTO payments (appointment_id, patient_id, amount, payment_date, method, status, reference_no, remarks)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (appointment_id, patient_id, amount, payment_date, method, status, reference_no, remarks),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO payments (appointment_id, patient_id, amount, payment_date, method, status, reference_no, remarks)
+                VALUES (%s, %s, %s, NOW(), %s, %s, %s, %s)
+                """,
+                (appointment_id, patient_id, amount, method, status, reference_no, remarks),
+            )
+        conn.commit()
+        return True, "Payment recorded."
+    except Error as exc:
+        return False, f"Insert failed: {exc}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def insert_patient_history(
+    patient_id: int,
+    appointment_id: int,
+    visit_date: str,
+    diagnosis: str | None = None,
+    treatment_given: str | None = None,
+    prescription: str | None = None,
+    follow_up_date: str | None = None,
+    notes: str | None = None,
+) -> Tuple[bool, str]:
+    """Insert a row into patient_history table."""
+    try:
+        conn = get_connection()
+    except Error as exc:
+        return False, f"DB connection failed: {exc}"
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO patient_history
+            (patient_id, appointment_id, visit_date, diagnosis, treatment_given, prescription, follow_up_date, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (patient_id, appointment_id, visit_date, diagnosis, treatment_given, prescription, follow_up_date, notes),
+        )
+        conn.commit()
+        return True, "Patient history saved."
+    except Error as exc:
+        return False, f"Insert failed: {exc}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def fetch_patient_history() -> Tuple[bool, str, Optional[list[dict]]]:
+    """Return all rows from patient_history table."""
+    try:
+        conn = get_connection()
+    except Error as exc:
+        return False, f"DB connection failed: {exc}", None
+
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM patient_history")
+        rows = cur.fetchall() or []
+        return True, "ok", rows
+    except Error as exc:
+        return False, f"Query failed: {exc}", None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def fetch_payments() -> Tuple[bool, str, Optional[list[dict]]]:
+    """Return all rows from payments table."""
+    try:
+        conn = get_connection()
+    except Error as exc:
+        return False, f"DB connection failed: {exc}", None
+
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM payments")
+        rows = cur.fetchall() or []
+        return True, "ok", rows
+    except Error as exc:
+        return False, f"Query failed: {exc}", None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
